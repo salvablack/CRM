@@ -1,145 +1,154 @@
 import streamlit as st
 import json
+import csv
+import io
+import math
 from datetime import datetime
 from pathlib import Path
 
-# ─────────────────────────────
-# CONFIG
-# ─────────────────────────────
-st.set_page_config(page_title="GPS Manager", layout="wide")
+st.set_page_config(layout="wide", page_title="GPS Tracker PRO")
 
-DATA_FILE = Path("data.json")
+DATA_FILE = Path("gps_data.json")
 
 # ─────────────────────────────
-# DATA LAYER
+# DATA
 # ─────────────────────────────
-class DataManager:
+def load():
+    if DATA_FILE.exists():
+        return json.loads(DATA_FILE.read_text())
+    return {"sessions": {}, "current": None}
 
-    @staticmethod
-    def load():
-        if DATA_FILE.exists():
-            try:
-                return json.loads(DATA_FILE.read_text())
-            except:
-                return {"sessions": {}}
-        return {"sessions": {}}
+def save(data):
+    DATA_FILE.write_text(json.dumps(data, indent=2))
 
-    @staticmethod
-    def save(data):
-        DATA_FILE.write_text(json.dumps(data, indent=2))
-
-
-# ─────────────────────────────
-# BUSINESS LOGIC
-# ─────────────────────────────
-class GPSService:
-
-    @staticmethod
-    def create_session(data, name):
-        sid = f"{name}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-        data["sessions"][sid] = {
-            "name": name,
-            "created": datetime.now().isoformat(),
-            "points": []
-        }
-        return sid
-
-    @staticmethod
-    def add_point(session, lat, lon, desc):
-        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-            raise ValueError("Coordenadas inválidas")
-
-        session["points"].append({
-            "lat": lat,
-            "lon": lon,
-            "desc": desc,
-            "date": datetime.now().isoformat()
-        })
-
-
-# ─────────────────────────────
-# INIT STATE
-# ─────────────────────────────
 if "data" not in st.session_state:
-    st.session_state.data = DataManager.load()
+    st.session_state.data = load()
 
 data = st.session_state.data
 
 # ─────────────────────────────
+# GPS JS
+# ─────────────────────────────
+gps_html = """
+<script>
+function getLocation(){
+    navigator.geolocation.getCurrentPosition(function(pos){
+        const lat = pos.coords.latitude;
+        const lon = pos.coords.longitude;
+
+        const url = new URL(window.location);
+        url.searchParams.set("lat", lat);
+        url.searchParams.set("lon", lon);
+        window.location.href = url;
+    });
+}
+</script>
+<button onclick="getLocation()">📍 Usar mi GPS</button>
+"""
+
+params = st.query_params
+
+lat_q = params.get("lat")
+lon_q = params.get("lon")
+
+# ─────────────────────────────
 # SIDEBAR
 # ─────────────────────────────
-st.sidebar.title("GPS Manager")
+st.sidebar.title("Sesiones")
 
-# Crear sesión
 name = st.sidebar.text_input("Nueva sesión")
+
 if st.sidebar.button("Crear"):
     if name:
-        sid = GPSService.create_session(data, name)
-        st.session_state.current = sid
-        DataManager.save(data)
+        sid = f"{name}_{datetime.now().strftime('%H%M%S')}"
+        data["sessions"][sid] = {"name": name, "points": []}
+        data["current"] = sid
+        save(data)
         st.rerun()
 
-# Selección
 sessions = list(data["sessions"].keys())
 
-if sessions:
-    selected = st.sidebar.selectbox(
-        "Sesión",
-        sessions,
-        format_func=lambda x: data["sessions"][x]["name"]
-    )
-    st.session_state.current = selected
-else:
-    st.info("Crea una sesión")
+if not sessions:
+    st.warning("Crea una sesión")
     st.stop()
 
-session = data["sessions"][st.session_state.current]
+current = st.sidebar.selectbox(
+    "Seleccionar",
+    sessions,
+    format_func=lambda x: data["sessions"][x]["name"]
+)
+
+data["current"] = current
+session = data["sessions"][current]
 
 # ─────────────────────────────
-# MAIN UI
+# MAIN
 # ─────────────────────────────
-st.title("Gestión de Puntos GPS")
-st.subheader(session["name"])
+st.title("GPS Tracker")
 
-# ─── FORM ───
-with st.form("point_form"):
-    col1, col2 = st.columns(2)
-    lat = col1.number_input("Latitud", format="%.6f")
-    lon = col2.number_input("Longitud", format="%.6f")
+tab1, tab2, tab3 = st.tabs(["📍 Captura", "🗺️ Mapa", "📤 Exportar"])
+
+# ─────────────────────────────
+# TAB 1
+# ─────────────────────────────
+with tab1:
+
+    st.components.v1.html(gps_html, height=80)
+
+    lat = float(lat_q) if lat_q else 0.0
+    lon = float(lon_q) if lon_q else 0.0
+
+    st.write("Lat:", lat, "Lon:", lon)
+
     desc = st.text_input("Descripción")
 
-    submitted = st.form_submit_button("Guardar punto")
-
-    if submitted:
-        try:
-            GPSService.add_point(session, lat, lon, desc)
-            DataManager.save(data)
-            st.success("Punto guardado")
+    if st.button("Guardar punto"):
+        if lat != 0 and lon != 0:
+            session["points"].append({
+                "lat": lat,
+                "lon": lon,
+                "desc": desc,
+                "time": datetime.now().isoformat()
+            })
+            save(data)
+            st.success("Guardado")
+            st.query_params.clear()
             st.rerun()
-        except Exception as e:
-            st.error(str(e))
+        else:
+            st.error("Primero obtén GPS")
 
-# ─── TABLE ───
-points = session["points"]
+    st.write(session["points"])
 
-if points:
-    st.subheader("Puntos registrados")
+# ─────────────────────────────
+# TAB 2 MAPA
+# ─────────────────────────────
+with tab2:
+    if session["points"]:
+        import pandas as pd
 
-    st.dataframe([
-        {
-            "Latitud": p["lat"],
-            "Longitud": p["lon"],
-            "Descripción": p["desc"],
-            "Fecha": p["date"]
-        }
-        for p in points
-    ])
+        df = pd.DataFrame(session["points"])
+        st.map(df.rename(columns={"lat": "latitude", "lon": "longitude"}))
+    else:
+        st.info("Sin puntos")
 
-    # Export
-    st.download_button(
-        "Exportar JSON",
-        data=json.dumps(points, indent=2),
-        file_name="gps_data.json"
-    )
-else:
-    st.warning("No hay puntos aún")
+# ─────────────────────────────
+# EXPORT
+# ─────────────────────────────
+with tab3:
+
+    if session["points"]:
+
+        # CSV
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=["lat","lon","desc","time"])
+        writer.writeheader()
+        writer.writerows(session["points"])
+
+        st.download_button("CSV", output.getvalue(), "data.csv")
+
+        # JSON
+        st.download_button(
+            "JSON",
+            json.dumps(session["points"], indent=2),
+            "data.json"
+        )
